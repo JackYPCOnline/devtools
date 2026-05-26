@@ -1,0 +1,17 @@
+# .github/workflows/rebase.yml on your fork
+name: Rebase selected PRs
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/rebase@v4
+        with:
+          base: main
+          include-labels: rebase-me
