@@ -206,10 +206,38 @@ def _github_get_all_pages(endpoint: str, repo: str | None = None) -> list[dict[s
         return f"Error {e!s}"
 
 
+# Names of write tools invoked during this process. Every write tool records its
+# invocation here -- whether it executed against the GitHub API (write mode) or
+# was recorded for deferred execution (read-only mode). The runner uses this to
+# verify that mandatory write operations (e.g. a bug-verifier's triage labels)
+# were actually attempted, rather than only described in the agent's prose.
+_invoked_write_tools: list[str] = []
+
+
+def get_invoked_write_tools() -> list[str]:
+    """Return the names of write tools invoked so far in this process."""
+    return list(_invoked_write_tools)
+
+
+def get_issue_label_names(issue_number: int, repo: str | None = None) -> list[str]:
+    """Return the label names currently on an issue.
+
+    A lightweight read helper (not an agent tool) used to verify issue state --
+    e.g. whether a triage label already landed from a prior run. Returns an empty
+    list on any error rather than raising, so callers can treat "unknown" as
+    "no label present".
+    """
+    result = _github_request("GET", f"issues/{issue_number}", repo)
+    if isinstance(result, dict):
+        return [label.get("name", "") for label in result.get("labels", [])]
+    return []
+
+
 def check_should_call_write_api_or_record(func):
     """Decorator that checks if a write api should be called, or if the tool should record to JSONL."""
     @wraps(func)
     def wrapper(*args, **kwargs):
+        _invoked_write_tools.append(func.__name__)
         try:
             if not _should_call_write_api():
                 # Record the tool request to JSONL file

@@ -29,8 +29,10 @@ from github_tools import (
     add_pr_comment,
     create_issue,
     create_pull_request,
+    get_invoked_write_tools,
     get_issue,
     get_issue_comments,
+    get_issue_label_names,
     get_pull_request,
     get_pr_files,
     get_pr_review_and_comments,
@@ -53,6 +55,73 @@ STRANDS_REGION = "us-west-2"
 
 # Default values for environment variables used only in this file
 DEFAULT_SYSTEM_PROMPT = "You are an autonomous GitHub agent powered by Strands Agents SDK."
+
+
+# Write tools that touch the issue itself. A bug-verifier run must end up applying
+# at least one of these (a triage label, or a comment) -- the SOP guarantees a
+# label on every verdict, plus a comment in the derived-repro / cannot-reproduce
+# cases.
+_ISSUE_WRITE_TOOLS = {"add_issue_labels", "add_issue_comment"}
+
+# Triage labels the bug-verifier applies. Used to recognise that a prior run's
+# work already landed on the issue when the current (resumed) run wrote nothing.
+_TRIAGE_LABELS = {"bug-validated", "bug-needs-info", "bug-cannot-reproduce"}
+
+
+def _issue_number_from_session_id(session_id: str) -> int | None:
+    """Extract the trailing issue number from an issue-scoped session ID.
+
+    Session IDs are formed as "<mode>-<issue>" (e.g. "bug-verifier-3216").
+    """
+    tail = session_id.rsplit("-", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def _enforce_required_writes(session_id: str | None) -> None:
+    """Fail a bug-verifier run that neither labels nor comments on the issue.
+
+    The bug-verifier SOP guarantees at least a triage label on every verdict, and
+    that write is what records a deferred operation for the finalize step to
+    replay. An agent that only *describes* applying a label -- without ever
+    invoking the tool -- produces a green run that never touches the issue and
+    uploads no write-operations artifact. This turns that silent no-op into a hard
+    failure.
+
+    Sessions are resumed across triggers, so a re-run may legitimately write
+    nothing because the label already landed in a prior run. In that case the
+    issue already carries a triage label, which we accept.
+    """
+    if not session_id or not session_id.startswith("bug-verifier"):
+        return
+
+    invoked = get_invoked_write_tools()
+    if _ISSUE_WRITE_TOOLS.intersection(invoked):
+        # This run applied (or, in read-only mode, deferred) a label or comment.
+        return
+
+    # No issue-facing write this run. Accept only if a prior run's triage label
+    # already landed on the issue (resumed, already-complete session).
+    issue_number = _issue_number_from_session_id(session_id)
+    if issue_number is not None:
+        try:
+            existing = get_issue_label_names(issue_number)
+            if _TRIAGE_LABELS.intersection(existing):
+                print(
+                    f"ℹ️ No write this run, but issue #{issue_number} already carries a "
+                    f"triage label {sorted(_TRIAGE_LABELS.intersection(existing))} from a "
+                    "prior run -- accepting."
+                )
+                return
+        except Exception as e:
+            print(f"⚠️ Could not verify existing triage labels: {e}")
+
+    raise RuntimeError(
+        "bug-verifier finished without applying a label or comment to the issue, "
+        "and no triage label from a prior run is present. The SOP mandates at least "
+        f"a triage label on every verdict (write tools this run: {invoked or 'none'}). "
+        "Nothing was applied to the issue and nothing was recorded for deferred "
+        "execution -- failing so this is not a silent no-op."
+    )
 
 
 def _send_eval_trigger(session_id: str, eval_type: str) -> None:
@@ -256,7 +325,11 @@ def run_agent(query: str):
         result = agent(query)
 
         print(f"\n\nAgent Result 🤖\nStop Reason: {result.stop_reason}\nMessage: {json.dumps(result.message, indent=2)}")
-        
+
+        # Fail loudly if a mode with a mandatory write (e.g. bug-verifier) finished
+        # without actually invoking it, rather than ending as a green no-op.
+        _enforce_required_writes(session_id)
+
         # Use the unique session ID from trace attributes (includes repo prefix)
         unique_session_id = trace_attributes.get("session.id", session_id)
         eval_type = session_id.split("-")[0] if "-" in session_id else session_id

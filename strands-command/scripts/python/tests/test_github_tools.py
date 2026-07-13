@@ -124,3 +124,33 @@ def test_get_pr_files_caps_pagination(monkeypatch):
     # Should terminate (at the page cap) rather than hang.
     out = github_tools.get_pr_files(1, repo="o/r")
     assert "f.py" in out
+
+
+def test_write_tool_invocation_is_tracked_in_write_mode():
+    """Every write tool records its invocation so the runner can verify mandatory writes happened."""
+    github_tools._invoked_write_tools.clear()
+    with patch.object(github_tools, "_should_call_write_api", lambda: True), \
+         patch.object(github_tools, "_github_request",
+                      lambda *a, **k: [{"name": "bug-needs-info"}]):
+        github_tools.add_issue_labels(3216, ["bug-needs-info"], repo="o/r")
+
+    assert "add_issue_labels" in github_tools.get_invoked_write_tools()
+
+
+def test_write_tool_invocation_tracked_and_recorded_when_deferred(tmp_path, monkeypatch):
+    """In read-only mode the write is recorded to JSONL *and* its invocation is tracked.
+
+    Guards the silent no-op: a bug-verifier that only describes applying a label
+    without calling the tool produces neither a tracked invocation nor a JSONL
+    record, which the runner now treats as a hard failure.
+    """
+    monkeypatch.chdir(tmp_path)
+    github_tools._invoked_write_tools.clear()
+    with patch.object(github_tools, "_should_call_write_api", lambda: False):
+        result = github_tools.add_issue_labels(3216, ["bug-needs-info"], repo="o/r")
+
+    assert "add_issue_labels" in github_tools.get_invoked_write_tools()
+    jsonl = tmp_path / ".artifact" / "write_operations.jsonl"
+    assert jsonl.exists()
+    assert "add_issue_labels" in jsonl.read_text()
+    assert "deferred" in result.lower()
